@@ -1,0 +1,52 @@
+# ==========================================
+# 1. Modelos de IA e Arquivos Pesados
+# ==========================================
+# Ignora o Mistral e qualquer outro modelo gigante
+*.gguf
+*.bin
+*.safetensors
+*.ckpt
+Fooocus-main/models/
+
+# ==========================================
+# 2. Imagens Geradas
+# ==========================================
+# Evita subir as imagens geradas para o repositório
+nexus-bridge/generated_images/
+Fooocus-main/outputs/
+
+# ==========================================
+# 3. Segredos e Configurações Locais
+# ==========================================
+# Fundamental para não vazar senhas e chaves de API
+.env
+.env.*
+!.env.example
+auth.json
+
+# ==========================================
+# 4. Python (Fooocus e Nexus-Bridge)
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.venv/
+
+# ==========================================
+# 5. Node.js e Next.js (ollama-web)
+# ==========================================
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# 6. Logs e Sistema Operacional
+# ==========================================
+*.log
+Thumbs.db
+.DS_Store

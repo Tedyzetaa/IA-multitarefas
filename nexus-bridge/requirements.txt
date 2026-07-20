@@ -1,0 +1,13 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+httpx==0.27.0
+pydantic==2.7.4
+pydantic-settings==2.3.4
+pynvml==11.5.0
+python-multipart==0.0.9
+# O container roda gradio==3.41.2 (ver requirements_versions.txt do Fooocus).
+# gradio_client precisa ser compativel com a versao do SERVIDOR, nao a mais
+# recente. Rode `pip index versions gradio_client` e confirme com
+# tools/discover_fooocus_api.py -- comece por esta faixa e ajuste se a
+# conexao/handshake falhar:
+gradio_client>=0.5.0,<0.7.0
