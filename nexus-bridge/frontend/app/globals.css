@@ -1,0 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+
+:root { --ink:#17221d; --muted:#6b776e; --paper:#f3f0e8; --line:#d5d7c9; --lime:#c9ee73; --coral:#f0785f; --panel:#fbfaf5; }
+* { box-sizing:border-box; }
+body { margin:0; color:var(--ink); background:var(--paper); font-family:'Space Grotesk', sans-serif; }
+button, textarea { font:inherit; }
+button { cursor:pointer; }
+.shell { min-height:100vh; display:grid; grid-template-columns:250px minmax(0,1fr) 300px; }
+.sidebar { padding:28px 22px; border-right:1px solid var(--line); display:flex; flex-direction:column; gap:32px; }
+.brand { font-size:18px; font-weight:700; letter-spacing:0; }
+.brand span { color:var(--coral); }
+.eyebrow { color:var(--muted); font:500 11px 'DM Mono', monospace; text-transform:uppercase; letter-spacing:0; }
+.nav { display:grid; gap:8px; }
+.nav button { text-align:left; border:0; background:transparent; padding:11px 12px; color:var(--muted); border-radius:5px; }
+.nav button.active, .nav button:hover { color:var(--ink); background:var(--lime); }
+.status { margin-top:auto; padding-top:18px; border-top:1px solid var(--line); display:grid; gap:10px; }
+.status-row { display:flex; justify-content:space-between; font-size:12px; }
+.dot { width:7px; height:7px; display:inline-block; border-radius:50%; background:var(--coral); margin-right:7px; }
+.dot.ready { background:#78a83d; }
+.main { min-width:0; padding:42px clamp(24px,5vw,76px); display:flex; flex-direction:column; }
+.heading { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; margin-bottom:46px; }
+h1 { font-size:clamp(34px,5vw,64px); line-height:.95; letter-spacing:0; margin:8px 0 0; max-width:620px; }
+.counter { font:500 12px 'DM Mono', monospace; color:var(--muted); white-space:nowrap; }
+.composer { background:var(--panel); border:1px solid var(--line); padding:18px; box-shadow:8px 8px 0 var(--lime); }
+textarea { width:100%; min-height:142px; resize:vertical; border:0; outline:0; background:transparent; color:var(--ink); font-size:19px; line-height:1.35; }
+.composer-footer { display:flex; justify-content:space-between; align-items:center; border-top:1px solid var(--line); padding-top:13px; gap:12px; }
+.primary { background:var(--ink); color:var(--paper); border:0; padding:12px 18px; border-radius:3px; font-weight:600; }
+.primary:disabled { opacity:.45; cursor:wait; }
+.mode { display:flex; gap:5px; }
+.mode button { background:transparent; border:1px solid var(--line); padding:7px 10px; font-size:12px; }
+.mode button.selected { border-color:var(--ink); background:var(--lime); }
+.jobs { margin-top:52px; }
+.job { border-top:1px solid var(--line); padding:17px 0; display:grid; grid-template-columns:1fr auto; gap:10px; }
+.job p { margin:5px 0 0; color:var(--muted); font-size:14px; }
+.job-meta { text-align:right; font:11px 'DM Mono', monospace; color:var(--muted); }
+.job-status { display:inline-flex; align-items:center; gap:8px; font-size:12px; }
+.artifacts { border-left:1px solid var(--line); padding:42px 22px; background:#ebe9df; }
+.artifacts h2 { margin:8px 0 26px; font-size:20px; }
+.empty { color:var(--muted); font-size:13px; line-height:1.5; }
+.artifact { background:var(--panel); margin-bottom:14px; padding:14px; border:1px solid var(--line); }
+.artifact img, .artifact video { display:block; width:100%; aspect-ratio:1; object-fit:cover; margin-top:12px; background:#dfe2d3; }
+.skeleton { display:grid; place-items:center; aspect-ratio:1; margin-top:12px; background:linear-gradient(110deg,#dfe2d3 30%,#eef0e4 45%,#dfe2d3 60%); background-size:200% 100%; animation:loading 1.4s linear infinite; color:var(--muted); font-size:12px; text-align:center; }
+@keyframes loading { to { background-position:-200% 0; } }
+.error { color:#a34231; font-size:13px; margin-top:14px; }
+@media (max-width: 980px) { .shell { grid-template-columns:190px minmax(0,1fr); } .artifacts { display:none; } }
+@media (max-width: 640px) { .shell { display:block; } .sidebar { border-right:0; border-bottom:1px solid var(--line); padding:18px; gap:18px; } .nav { display:flex; overflow:auto; } .nav button { white-space:nowrap; } .status { display:none; } .main { padding:28px 18px; } .heading { margin-bottom:30px; } .composer-footer { align-items:flex-start; flex-direction:column; } }

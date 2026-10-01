@@ -1,0 +1,3 @@
+import { artifactUrl, type Job } from "@/lib/nexusBridge";
+import { VideoCard } from "./VideoCard";
+export function ArtifactPanel({ jobs }:{ jobs:Job[] }) { const completed = jobs.filter((job) => job.status === "completed" && job.file_path); return <aside className="artifacts"><span className="eyebrow">Output stream</span><h2>Artefatos recentes</h2>{completed.length === 0 ? <p className="empty">Os resultados gerados pelo Nexus aparecerão aqui.</p> : completed.slice(0, 4).map((job) => job.kind === "video" ? <VideoCard key={job.id} job={job} /> : <div className="artifact" key={job.id}><span className="eyebrow">Imagem pronta</span><img src={artifactUrl(job)} alt={job.user_prompt} /></div>)}</aside>; }

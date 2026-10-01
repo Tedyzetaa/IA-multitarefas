@@ -1,2 +1,3 @@
-echo .\venv\Scripts\activate.bat
-call uvicorn app.main:app --reload
+call .\venv\Scripts\activate.bat
+call uvicorn app.main:app
+pause

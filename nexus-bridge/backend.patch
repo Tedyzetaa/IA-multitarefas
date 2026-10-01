@@ -1,0 +1,647 @@
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/app/config.py work/app/config.py
+--- a/app/config.py	2026-09-18 18:43:15.662130922 +0000
++++ b/app/config.py	2026-09-18 18:53:31.147711688 +0000
+@@ -3,8 +3,10 @@
+ Todos os parâmetros sensíveis a hardware ficam aqui, permitindo
+ ajuste rápido para diferentes GPUs/CPUs sem tocar no core.
+ """
++from typing import Annotated
++
+ from pydantic import field_validator, model_validator
+-from pydantic_settings import BaseSettings, SettingsConfigDict
++from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+ from pathlib import Path
+ 
+ 
+@@ -96,14 +98,24 @@
+     # --- Dublagem / Speech-to-Speech ---
+     ELEVENLABS_API_KEY: str = ""
+     ELEVENLABS_HOST: str = "https://api.elevenlabs.io"
+-    ELEVENLABS_DEFAULT_MODEL: str = "eleven_multilingual_v2"
++    # Speech-to-Speech exige um modelo com can_do_voice_conversion. "eleven_multilingual_v2"
++    # e um modelo de TTS e e rejeitado nesse endpoint.
++    ELEVENLABS_DEFAULT_MODEL: str = "eleven_multilingual_sts_v2"
+     ELEVENLABS_TIMEOUT_S: int = 120
++    # voz usada quando o frontend nao envia voice_id (opcional; ex.: um voice_id da sua biblioteca)
++    ELEVENLABS_DEFAULT_VOICE_ID: str = ""
+     DEFAULT_DUBBING_PROVIDER: str = "elevenlabs"
+     DEFAULT_PROVIDER_TIMEOUT_S: int = 120
+     DUBBING_BACKGROUND_THRESHOLD_BYTES: int = 10 * 1024 * 1024
+ 
+     # --- API ---
+-    CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
++    # NoDecode: sem isso o pydantic-settings tenta json.loads() no valor do .env ANTES do
++    # validator abaixo e quebra com "error parsing value for field CORS_ORIGINS" quando o
++    # valor e "a,b" (separado por virgula). Com NoDecode ambos os formatos funcionam.
++    CORS_ORIGINS: Annotated[list[str], NoDecode] = [
++        "http://localhost:3000", "http://127.0.0.1:3000",
++        "http://localhost:5173", "http://127.0.0.1:5173",
++    ]
+ 
+     # --- Logs ---
+     LOG_LEVEL: str = "INFO"
+@@ -113,14 +125,21 @@
+ 
+     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+ 
++    @field_validator("ELEVENLABS_API_KEY", mode="before")
++    @classmethod
++    def clean_api_key(cls, v):
++        # remove espacos, quebras de linha e aspas coladas por engano no .env
++        return v.strip().strip("\"'").strip() if isinstance(v, str) else v
++
+     @field_validator("CORS_ORIGINS", mode="before")
+     @classmethod
+-    def split_cors(cls, v):
+-        # Permite declarar no .env como string separada por virgula, ex:
+-        # CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+-        # (alem do formato lista, que o pydantic-settings ja aceita nativamente)
++    def parse_cors(cls, v):
+         if isinstance(v, str):
+-            return [origin.strip() for origin in v.split(",") if origin.strip()]
++            v = v.strip()
++            if v.startswith("["):
++                import json
++                return json.loads(v)
++            return [o.strip() for o in v.split(",") if o.strip()]
+         return v
+ 
+     @model_validator(mode="after")
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/app/main.py work/app/main.py
+--- a/app/main.py	2026-09-18 18:43:15.662172059 +0000
++++ b/app/main.py	2026-09-18 18:53:31.148217208 +0000
+@@ -3,7 +3,10 @@
+ 
+ from typing import Optional
+ 
++import uuid
++
+ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
++from fastapi.exceptions import RequestValidationError
+ from fastapi.middleware.cors import CORSMiddleware
+ from fastapi.responses import JSONResponse
+ from fastapi.staticfiles import StaticFiles
+@@ -83,6 +86,30 @@
+     )
+ 
+ 
++@app.exception_handler(RequestValidationError)
++async def validation_exception_handler(request: Request, exc: RequestValidationError):
++    """Loga POR QUE o 422 aconteceu (campo ausente, tipo invalido, corpo truncado...)."""
++    errors = [
++        {"loc": list(e.get("loc", [])), "msg": e.get("msg"), "type": e.get("type")}
++        for e in exc.errors()
++    ]
++    content_length = request.headers.get("content-length")
++    logger.error(
++        "422 em %s %s | content-type=%s | content-length=%s | erros=%s",
++        request.method, request.url.path,
++        request.headers.get("content-type", "")[:60], content_length, errors,
++    )
++    hint = None
++    if any(e["loc"][-1:] == ["file"] and e["type"] == "missing" for e in errors):
++        hint = (
++            "Campo multipart 'file' ausente. Causas: (1) o frontend usa outro nome de campo; "
++            "(2) o corpo chegou TRUNCADO (proxy do Next.js limita o body bufferizado a 10MB "
++            "quando ha middleware/proxy) -- envie direto ao FastAPI ou aumente "
++            "experimental.middlewareClientMaxBodySize / proxyClientMaxBodySize."
++        )
++    return JSONResponse(status_code=422, content={"error": "validation_error", "detail": errors, "hint": hint})
++
++
+ @app.exception_handler(Exception)
+ async def unhandled_exception_handler(request: Request, exc: Exception):
+     logger.exception(f"Erro nao tratado em {request.url.path}")
+@@ -198,7 +225,7 @@
+     target_language: Optional[str] = Form("pt-BR"),
+     provider: Optional[str] = Form("elevenlabs"),
+     voice_id: Optional[str] = Form(None),
+-    model_id: Optional[str] = Form("eleven_multilingual_v2"),
++    model_id: Optional[str] = Form(None),
+     language_code: Optional[str] = Form(None),
+     stability: float = Form(0.5),
+     similarity_boost: float = Form(0.75),
+@@ -206,82 +233,86 @@
+     speaker_boost: bool = Form(True),
+     output_format: str = Form("mp3"),
+ ):
+-    """Endpoint de dublagem expressiva com upload de áudio e retorno em bytes ou stream."""
+-    if not voice_id:
+-        raise HTTPException(status_code=400, detail="O campo 'voice_id' é obrigatório.")
+-
+-    name = (file.filename or "audio").lower()
+-    valid_exts = {"wav", "mp3", "m4a"}
+-    suffix = Path(name).suffix.lstrip(".").lower()
+-    if suffix not in valid_exts:
+-        raise HTTPException(
+-            status_code=400,
+-            detail="Formato de áudio inválido. Envie WAV, MP3 ou M4A.",
+-        )
++    """Endpoint de dublagem (Speech-to-Speech) com upload de áudio.
+ 
++    Arquivos >= DUBBING_BACKGROUND_THRESHOLD_BYTES vão para a fila (retorna job_id para polling
++    em /api/jobs/{job_id}); menores são processados de forma síncrona.
++    """
++    # Captura TUDO aqui: um 500 vindo do handler global (ServerErrorMiddleware) fica fora do
++    # CORSMiddleware e, num fetch direto do browser, vira "Failed to fetch" sem mensagem.
++    # HTTPException passa pelo CORS e chega ao cliente com o corpo JSON legível.
+     try:
+-        raw_audio = await file.read()
+-    except Exception as exc:
+-        logger.exception("Falha ao ler upload de áudio para dublagem")
+-        raise HTTPException(status_code=400, detail=f"Não foi possível ler o arquivo enviado: {exc}") from exc
+-
+-    if not raw_audio:
+-        raise HTTPException(status_code=400, detail="Arquivo de áudio vazio.")
+-
+-    request = DubbingRequest(
+-        voice_id=voice_id,
+-        file_name=file.filename or name,
+-        format=suffix,
+-        output_format=output_format.lower(),
+-        model_id=model_id or "eleven_multilingual_v2",
+-        provider=provider or "elevenlabs",
+-        target_language=target_language,
+-        language_code=language_code,
+-        file_content=raw_audio,
+-        voice_settings={
+-            "stability": stability,
+-            "similarity_boost": similarity_boost,
+-            "style": style,
+-            "speaker_boost": speaker_boost,
+-        },
+-    )
++        voice_id = (voice_id or "").strip() or settings.ELEVENLABS_DEFAULT_VOICE_ID.strip()
++        if not voice_id:
++            raise HTTPException(
++                status_code=400,
++                detail="Informe o voice_id da ElevenLabs (campo 'voice_id') ou defina "
++                       "ELEVENLABS_DEFAULT_VOICE_ID no .env do nexus-bridge.",
++            )
++
++        name = (file.filename or "audio").lower()
++        suffix = Path(name).suffix.lstrip(".").lower()
++        if suffix not in {"wav", "mp3", "m4a"}:
++            raise HTTPException(status_code=400, detail="Formato de áudio inválido. Envie WAV, MP3 ou M4A.")
+ 
+-    if raw_audio and len(raw_audio) >= settings.DUBBING_BACKGROUND_THRESHOLD_BYTES:
+-        job = Job(user_prompt=f"Dublagem para {voice_id}", request=request, kind="audio")
+-        await queue_manager.enqueue(job)
+-        return DubbingResponse(
+-            job_id=job.id,
+-            provider=request.provider,
+-            output_format=request.output_format,
+-            file_path=None,
+-            audio_url=None,
+-            message="Arquivo em processamento em background. Consulte o job em /api/jobs/{job_id}.",
+-            voice_id=request.voice_id,
+-        )
+-
+-    try:
+-        rendered = await dubbing_provider.process(raw_audio, request)
+-        output_dir = settings.OUTPUT_DIR_AUDIO
+-        output_dir.mkdir(parents=True, exist_ok=True)
+-        output_path = output_dir / f"{voice_id}-{model_id}-{len(rendered)}.{request.output_format}"
+-        output_path.write_bytes(rendered)
++        raw_audio = await file.read()
++        if not raw_audio:
++            raise HTTPException(status_code=400, detail="Arquivo de áudio vazio.")
++        logger.info("Dublagem: recebido %s (%.1f MB), voice_id=%s", file.filename, len(raw_audio) / 1e6, voice_id)
++
++        try:
++            request = DubbingRequest(
++                voice_id=voice_id,
++                file_name=file.filename or name,
++                format=suffix,
++                output_format=output_format.lower(),
++                model_id=model_id or settings.ELEVENLABS_DEFAULT_MODEL,
++                provider=provider or "elevenlabs",
++                target_language=target_language,
++                language_code=language_code,
++                file_content=raw_audio,
++                voice_settings={
++                    "stability": stability,
++                    "similarity_boost": similarity_boost,
++                    "style": style,
++                    "speaker_boost": speaker_boost,
++                },
++            )
++        except ValueError as exc:  # pydantic.ValidationError herda de ValueError
++            raise HTTPException(status_code=422, detail=f"Parâmetros de dublagem inválidos: {exc}") from exc
++
++        if len(raw_audio) >= settings.DUBBING_BACKGROUND_THRESHOLD_BYTES:
++            job = Job(user_prompt=f"Dublagem para {voice_id}", request=request, kind="audio")
++            await queue_manager.enqueue(job)
++            return DubbingResponse(
++                job_id=job.id,
++                provider=request.provider,
++                output_format=request.output_format,
++                message="Arquivo em processamento em background. Consulte o job em /api/jobs/{job_id}.",
++                voice_id=request.voice_id,
++            )
+ 
++        output_path = Path(await dubbing_provider.generate(raw_audio, request))
+         return DubbingResponse(
+-            job_id=str(hash(f"{voice_id}-{len(rendered)}-{output_path.name}")),
++            job_id=str(uuid.uuid4()),
+             provider=request.provider,
+             output_format=request.output_format,
+             file_path=str(output_path),
+             audio_url=f"/audio/{output_path.name}",
+             message="Dublagem concluída com sucesso.",
+             voice_id=request.voice_id,
+-            bytes_written=len(rendered),
++            bytes_written=output_path.stat().st_size,
+         )
++
++    except HTTPException:
++        raise
+     except ValueError as exc:
+         raise HTTPException(status_code=400, detail=str(exc)) from exc
+     except TimeoutError as exc:
+         raise HTTPException(status_code=504, detail=str(exc)) from exc
+     except ProviderUnavailableError as exc:
++        logger.error("Dublagem indisponível: %s", exc)
+         raise HTTPException(status_code=503, detail=str(exc)) from exc
+     except Exception as exc:
+         logger.exception("Erro ao processar dublagem")
+-        raise HTTPException(status_code=500, detail="Erro interno ao processar a dublagem.") from exc
++        raise HTTPException(status_code=500, detail=f"Erro interno ao processar a dublagem: {exc!r}") from exc
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/app/models.py work/app/models.py
+--- a/app/models.py	2026-09-18 18:43:15.662188313 +0000
++++ b/app/models.py	2026-09-18 18:43:15.686977648 +0000
+@@ -74,7 +74,10 @@
+     provider: Literal["elevenlabs", "local_flow_matching"] = "elevenlabs"
+     target_language: Optional[str] = None
+     language_code: Optional[str] = None
+-    file_content: Optional[bytes] = None
++    # exclude=True: os bytes do audio NUNCA entram na serializacao do Job
++    # (GET /api/jobs/{id}, /api/gallery). Sem isso, response_model=Job tenta
++    # converter ate 15MB+ de audio binario para JSON/UTF-8 e estoura em 500.
++    file_content: Optional[bytes] = Field(default=None, exclude=True, repr=False)
+     voice_settings: VoiceSettings = Field(default_factory=VoiceSettings)
+ 
+     @model_validator(mode="after")
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/app/providers/dubbing_provider.py work/app/providers/dubbing_provider.py
+--- a/app/providers/dubbing_provider.py	2026-09-18 18:43:15.662324808 +0000
++++ b/app/providers/dubbing_provider.py	2026-09-18 18:44:19.834773798 +0000
+@@ -1,6 +1,9 @@
++import io
+ import json
+ import logging
++import time
+ import uuid
++import wave
+ from typing import Any
+ 
+ import httpx
+@@ -11,14 +14,32 @@
+ 
+ logger = logging.getLogger("nexus.dubbing_provider")
+ 
++# Modelos aceitos pelo endpoint /v1/speech-to-speech (can_do_voice_conversion).
++# "eleven_multilingual_v2" & cia sao modelos de TTS e NAO funcionam aqui.
++_STS_MODELS = {"eleven_multilingual_sts_v2", "eleven_english_sts_v2"}
++
++_HEALTH_TTL_S = 60.0  # /api/status e /api/health chamam health_check a cada poll do frontend
++
++
++def _extract_error(response: httpx.Response) -> tuple[str, str]:
++    """Extrai (status, message) do corpo de erro da ElevenLabs, sem nunca expor a chave."""
++    try:
++        detail = response.json().get("detail")
++        if isinstance(detail, dict):
++            return str(detail.get("status", "")), str(detail.get("message", ""))
++        if isinstance(detail, list) and detail:
++            return "validation_error", json.dumps(detail)[:300]
++        return "", str(detail)[:300]
++    except Exception:
++        return "", response.text[:300]
++
+ 
+ class DubbingProvider(BaseProvider):
+     """Provider para dublagem expressiva com ElevenLabs Speech-to-Speech.
+ 
+-    A implementação atual usa a API oficial do ElevenLabs (Multilingual v2), mas a
+-    assinatura da classe foi desenhada para permitir futuro suporte a pipelines
+-    locais de Flow Matching / zero-shot TTS sem quebrar o código dos demais
+-    provedores existentes.
++    Observacao: Speech-to-Speech (voice changer) troca a VOZ preservando a
++    entonacao/emocao do audio original; ele NAO traduz. Traducao/dublagem entre
++    idiomas e outro produto (API /v1/dubbing).
+     """
+ 
+     provider_name = "elevenlabs"
+@@ -29,13 +50,23 @@
+         host: str | None = None,
+         timeout_s: float | None = None,
+     ) -> None:
+-        self.api_key = (api_key or settings.ELEVENLABS_API_KEY or "").strip()
++        self.api_key = (api_key or settings.ELEVENLABS_API_KEY or "").strip().strip("\"'")
+         self.host = (host or settings.ELEVENLABS_HOST).rstrip("/")
+         self.timeout_s = timeout_s or settings.ELEVENLABS_TIMEOUT_S
++        self._health_cache: tuple[float, bool] | None = None
+ 
++    # ------------------------------------------------------------------ health
+     async def health_check(self) -> bool:
++        now = time.monotonic()
++        if self._health_cache and now - self._health_cache[0] < _HEALTH_TTL_S:
++            return self._health_cache[1]
++        ok = await self._probe()
++        self._health_cache = (now, ok)
++        return ok
++
++    async def _probe(self) -> bool:
+         if not self.api_key:
+-            logger.warning("ELEVENLABS_API_KEY ausente. Dublagem em modo offline.")
++            logger.error("ELEVENLABS_API_KEY ausente no .env. Dublagem em modo offline.")
+             return False
+ 
+         try:
+@@ -44,18 +75,34 @@
+                     f"{self.host}/v1/voices",
+                     headers={"xi-api-key": self.api_key},
+                 )
+-                return response.status_code == 200
+-        except (httpx.ConnectError, httpx.TimeoutException):
++        except httpx.HTTPError as exc:  # ConnectError, Timeout, ReadError, ProtocolError...
++            logger.error("Nao foi possivel contatar a ElevenLabs em %s: %r", self.host, exc)
+             return False
+ 
+-    async def process(self, audio_bytes: bytes, request: DubbingRequest) -> bytes:
+-        """Processa uma faixa de áudio e retorna o resultado em bytes.
++        if response.status_code == 200:
++            return True
++
++        status, message = _extract_error(response)
++        if response.status_code == 401 and status == "missing_permissions":
++            # A chave AUTENTICA, mas e uma chave restrita sem a permissao de listar vozes.
++            # Isso nao impede a dublagem se ela tiver a permissao de speech_to_speech.
++            logger.warning(
++                "ElevenLabs 401 missing_permissions: %s -- a chave e valida mas restrita. "
++                "Garanta 'Speech to Speech' (e 'Voices: Read') em elevenlabs.io > API Keys.",
++                message,
++            )
++            return True
++
++        logger.error(
++            "ElevenLabs GET /v1/voices -> HTTP %s (status=%r): %s | chave: len=%d, prefixo=%r. "
++            "401 = chave invalida/revogada/de outra conta (ou plano free bloqueado por VPN/proxy).",
++            response.status_code, status, message, len(self.api_key), self.api_key[:3],
++        )
++        return False
+ 
+-        O endpoint oficial do ElevenLabs recebe um arquivo de áudio em multipart
+-        form-data e retorna um stream do áudio sintetizado. Para a API exposta no
+-        backend, o retorno vem como bytes e o endpoint FastAPI decide se entrega em
+-        stream ou anexo baseado no tipo de mídia.
+-        """
++    # ----------------------------------------------------------------- process
++    async def process(self, audio_bytes: bytes, request: DubbingRequest) -> bytes:
++        """Processa uma faixa de audio e retorna o resultado em bytes."""
+         if not audio_bytes:
+             raise ValueError("Arquivo de áudio vazio para dublagem.")
+ 
+@@ -67,31 +114,28 @@
+         if not self.api_key:
+             raise ProviderUnavailableError("ELEVENLABS_API_KEY não configurada no .env.")
+ 
+-        output_format = self._map_output_format(request.output_format)
+-        payload: dict[str, Any] = {
+-            "model_id": request.model_id or settings.ELEVENLABS_DEFAULT_MODEL,
+-            "output_format": output_format,
++        model_id = self._resolve_model_id(request.model_id)
++        vs = request.voice_settings
++        # Form fields do endpoint: model_id, voice_settings (JSON em string). O formato de
++        # saida (output_format) e QUERY PARAM neste endpoint, nao campo do multipart.
++        data: dict[str, Any] = {
++            "model_id": model_id,
+             "voice_settings": json.dumps({
+-                "stability": request.voice_settings.stability,
+-                "similarity_boost": request.voice_settings.similarity_boost,
+-                "style": request.voice_settings.style,
+-                "speaker_boost": request.voice_settings.speaker_boost,
++                "stability": vs.stability,
++                "similarity_boost": vs.similarity_boost,
++                "style": vs.style,
++                "use_speaker_boost": vs.speaker_boost,  # nome do campo na API da ElevenLabs
+             }),
+         }
+-        if request.target_language:
+-            payload["target_language"] = request.target_language
+-        if request.language_code:
+-            payload["language_code"] = request.language_code
++        if request.target_language or request.language_code:
++            logger.warning(
++                "target_language/language_code ignorados: Speech-to-Speech nao traduz "
++                "(so converte a voz). Para traduzir use a API de Dubbing da ElevenLabs."
++            )
+ 
+         file_name = request.file_name or f"source.{request.format}"
+-        mime_type = self._audio_mime_type(request.output_format)
+-        files = {
+-            "audio": (
+-                file_name,
+-                audio_bytes,
+-                mime_type,
+-            )
+-        }
++        files = {"audio": (file_name, audio_bytes, self._audio_mime_type(request.format))}
++        params = {"output_format": self._map_output_format(request.output_format)}
+ 
+         try:
+             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
+@@ -101,39 +145,42 @@
+                         "xi-api-key": self.api_key,
+                         "Accept": self._audio_accept_header(request.output_format),
+                     },
+-                    data=payload,
++                    params=params,
++                    data=data,
+                     files=files,
+                 )
+                 response.raise_for_status()
+-                return response.content
++                content = response.content
+         except httpx.TimeoutException as exc:
+             raise TimeoutError(
+                 f"Timeout ao consultar ElevenLabs para dublagem do voice_id={request.voice_id}."
+             ) from exc
+-        except httpx.ConnectError as exc:
++        except httpx.HTTPStatusError as exc:
++            status, message = _extract_error(exc.response)
++            hint = ""
++            if exc.response.status_code == 401:
++                hint = " (chave inválida/revogada ou sem a permissão 'Speech to Speech')"
++            logger.error("ElevenLabs STS -> HTTP %s (%s): %s", exc.response.status_code, status, message)
+             raise ProviderUnavailableError(
+-                f"Conexão com ElevenLabs indisponível em {self.host}: {exc}"
++                f"ElevenLabs respondeu HTTP {exc.response.status_code}{hint}: {message}"
+             ) from exc
+-        except httpx.HTTPStatusError as exc:
+-            detail = exc.response.text[:400] if exc.response is not None else str(exc)
++        except httpx.HTTPError as exc:
+             raise ProviderUnavailableError(
+-                f"ElevenLabs respondeu com erro {exc.response.status_code if exc.response else 'desconhecido'}: {detail}"
++                f"Falha de comunicação com ElevenLabs em {self.host}: {exc!r}"
+             ) from exc
+ 
++        if request.output_format.lower() == "wav" and not content.startswith(b"RIFF"):
++            content = self._pcm16_to_wav(content, sample_rate=16000)
++        return content
++
+     async def generate(self, audio_bytes: bytes, request: DubbingRequest) -> str:
+         """Salva a saída em disco e devolve o caminho do arquivo gerado."""
+         generated_audio = await self.process(audio_bytes, request)
+         output_dir = settings.OUTPUT_DIR_AUDIO
+         output_dir.mkdir(parents=True, exist_ok=True)
+ 
+-        suffix = request.output_format.lower()
+-        if suffix == "mp3":
+-            extension = "mp3"
+-        elif suffix == "wav":
+-            extension = "wav"
+-        elif suffix == "m4a":
+-            extension = "m4a"
+-        else:
++        extension = request.output_format.lower()
++        if extension not in {"mp3", "wav", "m4a"}:
+             extension = "mp3"
+ 
+         filepath = output_dir / f"{uuid.uuid4()}.{extension}"
+@@ -141,29 +188,46 @@
+         logger.info("Dublagem salva em %s", filepath)
+         return str(filepath)
+ 
++    # ----------------------------------------------------------------- helpers
++    @staticmethod
++    def _resolve_model_id(model_id: str | None) -> str:
++        if model_id in _STS_MODELS:
++            return model_id
++        fallback = settings.ELEVENLABS_DEFAULT_MODEL
++        if fallback not in _STS_MODELS:
++            fallback = "eleven_multilingual_sts_v2"
++        if model_id:
++            logger.warning(
++                "model_id=%r nao suporta Speech-to-Speech; usando %r.", model_id, fallback
++            )
++        return fallback
++
++    @staticmethod
++    def _pcm16_to_wav(pcm: bytes, sample_rate: int) -> bytes:
++        """pcm_16000 da ElevenLabs e PCM S16LE cru (sem header) -> embrulha em WAV tocavel."""
++        buf = io.BytesIO()
++        with wave.open(buf, "wb") as w:
++            w.setnchannels(1)
++            w.setsampwidth(2)
++            w.setframerate(sample_rate)
++            w.writeframes(pcm)
++        return buf.getvalue()
++
+     @staticmethod
+     def _map_output_format(output_format: str) -> str:
+         mapping = {
+-            "mp3": "mp3_44100_128kbps",
++            "mp3": "mp3_44100_128",
+             "wav": "pcm_16000",
+             "m4a": "aac_44100_128kbps",
+         }
+-        return mapping.get(output_format.lower(), "mp3_44100_128kbps")
++        return mapping.get(output_format.lower(), "mp3_44100_128")
+ 
+     @staticmethod
+     def _audio_accept_header(output_format: str) -> str:
+-        mapping = {
+-            "mp3": "audio/mpeg",
+-            "wav": "audio/wav",
+-            "m4a": "audio/mp4",
+-        }
++        mapping = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4"}
+         return mapping.get(output_format.lower(), "audio/mpeg")
+ 
+     @staticmethod
+-    def _audio_mime_type(output_format: str) -> str:
+-        mapping = {
+-            "mp3": "audio/mpeg",
+-            "wav": "audio/wav",
+-            "m4a": "audio/mp4",
+-        }
+-        return mapping.get(output_format.lower(), "audio/mpeg")
++    def _audio_mime_type(fmt: str) -> str:
++        mapping = {"mp3": "audio/mpeg", "wav": "audio/wav", "m4a": "audio/mp4"}
++        return mapping.get(fmt.lower(), "audio/mpeg")
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/app/services/orchestrator.py work/app/services/orchestrator.py
+--- a/app/services/orchestrator.py	2026-09-18 18:43:15.662739838 +0000
++++ b/app/services/orchestrator.py	2026-09-18 18:44:19.859973668 +0000
+@@ -36,20 +36,23 @@
+         try:
+             await status_manager.set_processing(job.id)
+ 
+-            if not job.refined_prompt:
+-                job.status = JobStatus.REFINING_PROMPT
+-                await status_manager.set_ollama("busy")
+-                logger.info("[Orchestrator] Enviando prompt para o Ollama refinar (mode=%s)...", job.kind)
+-                job.refined_prompt = await self.llm.refine_prompt(job.user_prompt, mode=job.kind)
+-                logger.info("[Orchestrator] Prompt refinado pelo Ollama: %s", job.refined_prompt)
+-                await status_manager.set_ollama("ready")
+-
+-            # Libera VRAM do LLM ANTES de acionar Fooocus/LTX-Video. Este e o
+-            # passo critico para notebooks com VRAM compartilhada (RTX 3050
+-            # 6GB): nunca deixamos Ollama e o gerador (imagem OU video) com
+-            # peso em memoria ao mesmo tempo.
+-            job.status = JobStatus.UNLOADING_LLM
+-            await self.llm.clear_context()
++            # Jobs de audio (dublagem) nao usam LLM: antes eram enviados ao Ollama com o
++            # system prompt de IMAGEM e falhavam se o Ollama estivesse offline.
++            if job.kind != "audio":
++                if not job.refined_prompt:
++                    job.status = JobStatus.REFINING_PROMPT
++                    await status_manager.set_ollama("busy")
++                    logger.info("[Orchestrator] Enviando prompt para o Ollama refinar (mode=%s)...", job.kind)
++                    job.refined_prompt = await self.llm.refine_prompt(job.user_prompt, mode=job.kind)
++                    logger.info("[Orchestrator] Prompt refinado pelo Ollama: %s", job.refined_prompt)
++                    await status_manager.set_ollama("ready")
++
++                # Libera VRAM do LLM ANTES de acionar Fooocus/LTX-Video. Este e o
++                # passo critico para notebooks com VRAM compartilhada (RTX 3050
++                # 6GB): nunca deixamos Ollama e o gerador (imagem OU video) com
++                # peso em memoria ao mesmo tempo.
++                job.status = JobStatus.UNLOADING_LLM
++                await self.llm.clear_context()
+ 
+             if job.kind == "video":
+                 if self.video is None:
+@@ -98,8 +101,9 @@
+                 if not audio_bytes:
+                     raise ProviderUnavailableError("Arquivo de áudio indisponível para processamento de dublagem.")
+ 
+-                result = await self.dubbing.process(audio_bytes, job.request)
+-                job.file_path = str(result) if isinstance(result, str) else None
++                # process() devolve BYTES; o codigo antigo descartava o resultado
++                # (isinstance(result, str) era sempre False). generate() grava em disco.
++                job.file_path = await self.dubbing.generate(audio_bytes, job.request)
+                 job.refined_prompt = f"Dublagem via {self.dubbing.provider_name} para {job.request.voice_id}"
+                 await status_manager.set_dubbing("ready")
+             else:
+@@ -128,6 +132,9 @@
+             job.error = f"Erro inesperado: {e}"
+             logger.exception("Erro inesperado no pipeline")
+         finally:
++            # libera o audio da RAM (ate 200 jobs no historico x 15MB+ cada)
++            if job.kind == "audio" and job.request is not None and hasattr(job.request, "file_content"):
++                job.request.file_content = None
+             await status_manager.set_ollama("ready")
+             await status_manager.set_fooocus("ready")
+             if self.video is not None:
+diff -ruN --strip-trailing-cr -x __pycache__ -x .env -x 'generated_*' orig/requirements.txt work/requirements.txt
+--- a/requirements.txt	2026-09-18 18:43:15.663295168 +0000
++++ b/requirements.txt	2026-09-18 18:44:19.860078151 +0000
+@@ -10,7 +10,7 @@
+ 
+ # Validação de Dados e Configurações (.env)
+ pydantic>=2.9.0,<3.0.0
+-pydantic-settings>=2.5.0,<3.0.0
++pydantic-settings>=2.7.0,<3.0.0  # NoDecode (CORS_ORIGINS)
+ python-dotenv>=1.0.0
+ 
+ # Processamento de Imagem, Conexões e Utilitários do Projeto

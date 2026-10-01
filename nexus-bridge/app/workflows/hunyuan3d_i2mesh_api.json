@@ -1,0 +1,93 @@
+{
+  "_comment": "Workflow de referencia (formato API do ComfyUI) para o pipeline image-to-3D via Hunyuan3D 2.0. Reconstruido a partir do template OFICIAL do proprio ComfyUI-Core (Comfy-Org/workflow_templates, arquivo templates/3d_hunyuan3d_image_to_model.json, procurar 'HY 3D 2.0' na Template Library da UI) -- usa SOMENTE nos nativos do ComfyUI (nenhum custom node pack e necessario): ImageOnlyCheckpointLoader, ModelSamplingAuraFlow, CLIPVisionEncode, EmptyLatentHunyuan3Dv2, Hunyuan3Dv2Conditioning, KSampler, VAEDecodeHunyuan3D, VoxelToMesh, SaveGLB. Requer ComfyUI >= 0.3.35 (fluxo estabilizado nessa versao). Saida: malha SEM textura (.glb) em ComfyUI/output/mesh/ -- este workflow gera so a GEOMETRIA (Hunyuan3D-DiT), nao roda o estagio de textura/PBR (Hunyuan3D-Paint), que exigiria bem mais VRAM. Igual aos outros workflows deste projeto (ver comfyui_provider.py/comfyui_video_provider.py), o ComfyUI3DProvider edita este grafo em runtime localizando os nos por _meta.title -- reexporte da UI (Workflow > Export (API Format)) se voce customizar o grafo, mantendo os titulos abaixo.",
+  "54": {
+    "class_type": "ImageOnlyCheckpointLoader",
+    "_meta": { "title": "hy3d_checkpoint" },
+    "inputs": {
+      "ckpt_name": "hunyuan3d-dit-v2_fp16.safetensors"
+    }
+  },
+  "56": {
+    "class_type": "LoadImage",
+    "_meta": { "title": "input_image" },
+    "inputs": {
+      "image": "input_image.png",
+      "upload": "image"
+    }
+  },
+  "70": {
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": { "title": "model_sampling" },
+    "inputs": {
+      "model": ["54", 0],
+      "shift": 1.0
+    }
+  },
+  "51": {
+    "class_type": "CLIPVisionEncode",
+    "_meta": { "title": "clip_vision_encode" },
+    "inputs": {
+      "clip_vision": ["54", 1],
+      "image": ["56", 0],
+      "crop": "none"
+    }
+  },
+  "66": {
+    "class_type": "EmptyLatentHunyuan3Dv2",
+    "_meta": { "title": "empty_latent_hy3d" },
+    "inputs": {
+      "resolution": 3072,
+      "batch_size": 1
+    }
+  },
+  "80": {
+    "class_type": "Hunyuan3Dv2Conditioning",
+    "_meta": { "title": "hy3d_conditioning" },
+    "inputs": {
+      "clip_vision_output": ["51", 0]
+    }
+  },
+  "3": {
+    "class_type": "KSampler",
+    "_meta": { "title": "ksampler" },
+    "inputs": {
+      "model": ["70", 0],
+      "positive": ["80", 0],
+      "negative": ["80", 1],
+      "latent_image": ["66", 0],
+      "seed": 0,
+      "steps": 20,
+      "cfg": 8,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1
+    }
+  },
+  "61": {
+    "class_type": "VAEDecodeHunyuan3D",
+    "_meta": { "title": "vae_decode_hy3d" },
+    "inputs": {
+      "samples": ["3", 0],
+      "vae": ["54", 2],
+      "num_chunks": 8000,
+      "octree_resolution": 256
+    }
+  },
+  "81": {
+    "class_type": "VoxelToMesh",
+    "_meta": { "title": "voxel_to_mesh" },
+    "inputs": {
+      "voxel": ["61", 0],
+      "algorithm": "surface net",
+      "threshold": 0.6
+    }
+  },
+  "82": {
+    "class_type": "SaveGLB",
+    "_meta": { "title": "save_glb" },
+    "inputs": {
+      "mesh": ["81", 0],
+      "filename_prefix": "mesh/nexus_bridge"
+    }
+  }
+}

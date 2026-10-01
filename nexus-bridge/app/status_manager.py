@@ -10,6 +10,9 @@ class StatusManager:
         self._lock = asyncio.Lock()
         self.ollama_status = "unknown"
         self.fooocus_status = "unknown"
+        self.ltx_video_status = "unknown"
+        self.dubbing_status = "idle"
+        self.comfyui_3d_status = "unknown"
         self.queue_length = 0
         self.processing_job_id: Optional[str] = None
 
@@ -20,6 +23,18 @@ class StatusManager:
     async def set_fooocus(self, status: str):
         async with self._lock:
             self.fooocus_status = status
+
+    async def set_ltx_video(self, status: str):
+        async with self._lock:
+            self.ltx_video_status = status
+
+    async def set_dubbing(self, status: str):
+        async with self._lock:
+            self.dubbing_status = status
+
+    async def set_comfyui_3d(self, status: str):
+        async with self._lock:
+            self.comfyui_3d_status = status
 
     async def set_queue_length(self, n: int):
         async with self._lock:
@@ -34,6 +49,9 @@ class StatusManager:
             return SystemStatus(
                 ollama=self.ollama_status,
                 fooocus=self.fooocus_status,
+                ltx_video=self.ltx_video_status,
+                dubbing=self.dubbing_status,
+                comfyui_3d=self.comfyui_3d_status,
                 queue_length=self.queue_length,
                 processing_job_id=self.processing_job_id,
             )

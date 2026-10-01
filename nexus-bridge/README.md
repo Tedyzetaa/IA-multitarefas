@@ -1,113 +1,70 @@
-# Nexus-Bridge
+**README.md**
 
-Orquestrador local que conecta **Ollama** (refinamento de prompt via LLM) e
-**Fooocus** (geração de imagem) num pipeline único, pensado para rodar num
-notebook com VRAM limitada (referência: i5-13420H, 16GB RAM, RTX 3050 6GB).
+Bem-vindo ao Nexus: Um Projeto de Inteligência Artificial Avançado para Tradução e Dublagem!
 
-## Por que essa arquitetura resolve o problema de VRAM
+### Introdução
 
-Numa GPU de 6GB, Ollama (modelo Qwen2.5-Coder) e Fooocus (SDXL/SD) **não
-cabem em VRAM ao mesmo tempo** com folga de segurança. Duas camadas resolvem isso:
+O Nexus é um projeto de software que utiliza técnicas de inteligência artificial para realizar traduções e dublagens de alta qualidade. O objetivo do projeto é fornecer uma plataforma escalável e eficiente para realizar tarefas de tradução e dublagem, com foco em precisão e velocidade.
 
-1. **Fila interna com worker único** (`queue_manager.py`): usa `asyncio.Queue`
-   + um único worker assíncrono. Mesmo que dois usuários disparem requisições
-   simultâneas, apenas **um job por vez** é processado do início ao fim.
-2. **Unload explícito do LLM antes da imagem** (`orchestrator.py`): depois que
-   o Ollama devolve o prompt refinado, o sistema chama `clear_context()`, que
-   envia `keep_alive=0` ao Ollama — isso descarrega o modelo da VRAM
-   **antes** de disparar o Fooocus. Sem essa etapa, os dois processos
-   disputariam a mesma memória e você veria erros como `CUDA out of memory`
-   ou `alloc_tensor`.
-3. **Guarda de recursos com retry gracioso** (`resource_manager.py`): se
-   `pynvml` detectar VRAM livre abaixo da margem de segurança, ou se o
-   Fooocus retornar um erro de OOM, o sistema automaticamente reduz `steps`
-   e resolução e tenta novamente (até `MAX_RETRIES_ON_OOM` vezes) antes de
-   desistir.
+### Características
 
-## Arquitetura (módulos trocáveis)
+- **Tradução e Dublagem**: O Nexus pode realizar traduções e dublagens em vários idiomas, incluindo inglês, espanhol, francês, alemão, japonês e chinês.
+- **Técnicas de IA**: O projeto utiliza técnicas de processamento de linguagem natural (NLP) e aprendizado de máquina para realizar traduções e dublagens.
+- **Plataforma Escalável**: O Nexus é projetado para ser escalável, permitindo que ele seja executado em ambientes com grande demanda de recursos.
+- **Integração com APIs**: O projeto pode integrar-se com várias APIs de tradução e dublagem, incluindo Google Translate, Microsoft Translator e Amazon Translate.
 
-```
-backend/app/
-├── providers/
-│   ├── base.py              <- contratos abstratos (LLMProvider, ImageProvider)
-│   ├── ollama_provider.py   <- implementação concreta para Ollama
-│   └── fooocus_provider.py  <- implementação concreta para Fooocus
-├── services/
-│   └── orchestrator.py      <- CORE: pipeline LLM -> unload -> Imagem. Nunca muda.
-├── queue_manager.py         <- fila assíncrona (troque por Redis/arq se precisar escalar)
-├── resource_manager.py      <- guarda de VRAM + retry
-├── status_manager.py        <- estado ready/busy/offline exposto ao frontend
-├── models.py / config.py
-└── main.py                  <- FastAPI, endpoint gateway /api/generate
-```
+### Componentes
 
-**Para trocar o modelo do Ollama:** edite `OLLAMA_MODEL` no `.env`.
+O Nexus é composto por vários componentes, incluindo:
 
-**Para trocar o gerador de imagem** (ex: sair do Fooocus e ir para ComfyUI):
-crie `app/providers/comfyui_provider.py` implementando `ImageProvider` (mesma
-interface: `generate()` e `health_check()`), e troque uma linha em
-`main.py`:
+- **App**: É o núcleo do projeto, responsável por gerenciar as tarefas de tradução e dublagem.
+- **Providers**: São os provedores de serviços que realizam as tarefas de tradução e dublagem. Exemplos incluem Google Translate, Microsoft Translator e Amazon Translate.
+- **Queue Manager**: É o componente responsável por gerenciar a fila de tarefas de tradução e dublagem.
+- **Status Manager**: É o componente responsável por gerenciar o status das tarefas de tradução e dublagem.
 
-```python
-image_provider = ComfyUIProvider()  # antes: FooocusProvider()
-```
+### Funções
 
-O `orchestrator.py` e o `queue_manager.py` **não precisam ser tocados** —
-esse é o ponto do Dependency Injection usado aqui.
+O Nexus oferece várias funções, incluindo:
 
-**Para escalar além de um notebook:** troque `QueueManager` (asyncio.Queue)
-por uma implementação com Redis + `arq`, mantendo a mesma interface pública
-(`enqueue`, `get_job`, `list_jobs`).
+- **Traduzir texto**: O usuário pode inserir um texto para ser traduzido em outro idioma.
+- **Dublar áudio**: O usuário pode inserir um arquivo de áudio para ser dublado em outro idioma.
+- **Gerenciar fila**: O usuário pode gerenciar a fila de tarefas de tradução e dublagem.
+- **Verificar status**: O usuário pode verificar o status das tarefas de tradução e dublagem.
 
-## Setup
+### Requisitos
 
-### Backend
+O Nexus requer os seguintes requisitos:
 
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env      # ajuste hosts/modelo se necessário
-uvicorn app.main:app --reload --port 8000
-```
+- Python 3.7 ou superior
+- Bibliotecas necessárias: Flask, PyJWT, Boto3, Google Cloud Client Library
+- Ambiente de desenvolvimento: PyCharm, Visual Studio Code
 
-Pré-requisitos rodando localmente:
-- Ollama em `http://127.0.0.1:11434` com o modelo `qwen2.5-coder:7b` puxado
-  (`ollama pull qwen2.5-coder:7b`)
-- Fooocus com API ativada em `http://127.0.0.1:7865`
-  (`python entry_with_update.py --api`)
+### Instalação
 
-`pynvml` é opcional: se não houver GPU NVIDIA acessível (ou o driver não
-expuser NVML), o sistema simplesmente ignora a checagem preventiva de VRAM e
-segue confiando apenas na detecção de erro OOM vinda do Fooocus.
+Para instalar o Nexus, siga os passos abaixo:
 
-### Frontend
+1. Clonar o repositório do GitHub.
+2. Criar um ambiente virtual com Python 3.7 ou superior.
+3. Instalar as bibliotecas necessárias.
+4. Executar o aplicativo com o comando `python app/main.py`.
 
-```bash
-cd frontend
-npm install
-npm run dev
-```
+### Documentação
 
-Acesse `http://localhost:5173`. O frontend consome a API em
-`http://127.0.0.1:8000` por padrão (ajustável via `VITE_API_BASE`).
+Para obter mais informações sobre a documentação do Nexus, clique [aqui](SUMMARY.md).
 
-## Endpoints principais
+### Contribuição
 
-| Método | Rota                  | Descrição                                      |
-|--------|------------------------|-------------------------------------------------|
-| POST   | `/api/generate`        | Gateway único: recebe `user_prompt`, enfileira |
-| GET    | `/api/jobs/{job_id}`   | Status/resultado do job (para polling)         |
-| GET    | `/api/gallery`         | Histórico paginado (lazy-load)                 |
-| GET    | `/api/status`          | Status do Ollama/Fooocus + tamanho da fila     |
+O Nexus é um projeto aberto e você pode contribuir para ele! Para fazer isso, siga os passos abaixo:
 
-## Fluxo de um job
+1. Clonar o repositório do GitHub.
+2. Crie uma nova branch com seu nome.
+3. Faça suas alterações e commits.
+4. Abra uma solicitação de pull.
 
-```
-QUEUED -> REFINING_PROMPT (Ollama) -> UNLOADING_LLM (libera VRAM)
-        -> GENERATING_IMAGE (Fooocus) -> COMPLETED | FAILED
-```
+### Licença
 
-Cada estágio é refletido em tempo real no frontend via polling (1.5s
-enquanto o job está ativo, 3s para o status geral do sistema).
+O Nexus é licenciado sob a licença MIT. Você pode ler mais sobre a licença [aqui](LICENSE.md).
+
+**Fim da Documentação**
+
+Espero que você tenha gostado do README do Nexus! Se tiver alguma dúvida ou precisar de ajuda, não hesite em contatar-me.

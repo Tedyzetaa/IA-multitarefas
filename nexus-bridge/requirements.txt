@@ -1,13 +1,62 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-httpx==0.27.0
-pydantic==2.7.4
-pydantic-settings==2.3.4
-pynvml==11.5.0
-python-multipart==0.0.9
-# O container roda gradio==3.41.2 (ver requirements_versions.txt do Fooocus).
-# gradio_client precisa ser compativel com a versao do SERVIDOR, nao a mais
-# recente. Rode `pip index versions gradio_client` e confirme com
-# tools/discover_fooocus_api.py -- comece por esta faixa e ajuste se a
-# conexao/handshake falhar:
-gradio_client>=0.5.0,<0.7.0
+# Web Framework & Servidor
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+
+# Processamento de Uploads e Formulários (CRÍTICO para UploadFile / Dublagem)
+python-multipart>=0.0.9
+
+# Cliente HTTP Assíncrono (CRÍTICO para chamadas à API da ElevenLabs)
+httpx>=0.27.0
+
+# Validação de Dados e Configurações (.env)
+pydantic>=2.9.0,<3.0.0
+pydantic-settings>=2.7.0,<3.0.0  # NoDecode (CORS_ORIGINS)
+python-dotenv>=1.0.0
+
+# Processamento de Imagem, Conexões e Utilitários do Projeto
+Pillow>=10.2.0
+websockets>=12.0
+requests>=2.31.0
+
+# --- Dublagem por tradução local (translation_dubbing: whisper -> Ollama -> XTTS v2) ---
+# REQUER Python < 3.14 (limite atual do coqui-tts) -- recrie a venv em 3.12 antes de instalar.
+faster-whisper>=1.0.0
+coqui-tts>=0.27.0
+# torch/torchaudio: NAO fixamos a wheel de CUDA aqui de propósito -- a build certa
+# depende do seu driver NVIDIA. Instale ANTES do resto seguindo
+# https://pytorch.org/get-started/locally/ (escolha CUDA 12.x compatível com seu driver),
+# senão o pip vai puxar a wheel CPU-only e tudo (whisper + XTTS) vai rodar em CPU (lento).
+# Exemplo (ajuste cu121/cu124 conforme seu driver):
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# torch >= 2.2 é OBRIGATÓRIO: abaixo disso falta torch.utils._pytree.register_pytree_node
+# e o import do transformers (puxado pelo coqui-tts) quebra com
+# "AttributeError: module 'torch.utils._pytree' has no attribute 'register_pytree_node'".
+# Versões abaixo TRAVADAS (==) porque o coqui-tts não fixa um teto pro transformers
+# (só ">=4.57"), então um "pip install -r requirements.txt" sem pin pode puxar
+# transformers 5.x de novo e voltar o mesmo erro (confirmado nesta instalação:
+# Windows + RTX 3050, CUDA 12.1, Python 3.11, 19/09/2026).
+torch==2.5.1
+torchaudio==2.5.1
+# transformers==4.57.6 tem a dependency_versions_table.py interna quebrada
+# (pede tokenizers>=0.23.1,<0.24.0 em runtime mas declara <=0.23.0 no pip, e
+# quebra "Backend should be defined in the BACKENDS_MAPPING: tensorflow_text")
+# -- NAO instalar essa versao. 4.57.4 é a confirmada funcionando.
+transformers==4.57.4
+huggingface-hub==0.36.2
+tokenizers==0.22.2
+faster-whisper==1.2.1
+coqui-tts==0.27.5
+# ctranslate2 4.8.2 não é o problema por si; o problema vem da stack torch+cu121
+# com cuDNN 9 em Windows/RTX 3050 + CUDA 12.1. O que precisamos isolar aqui é a
+# dependencia de cuDNN para evitar que o pip puxe a 9.1.0.70 de volta em venvs novas.
+ctranslate2==4.8.2
+nvidia-cublas-cu12>=12.1
+nvidia-cudnn-cu12>=9.3.0  # torch 2.5.1 pede 9.1.0.70 (sem cudnnGetLibConfig); fixamos uma build mais nova pro ctranslate2 4.8.2 funcionar
+# Instale o torch/torchaudio ANTES do resto com a wheel CUDA certa pro seu driver:
+#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
+# depois rode "pip install -r requirements.txt" normalmente.
+
+# Testes
+pytest>=8.0.0
+
+# .

@@ -1,0 +1,2 @@
+import type { Job } from "@/lib/nexusBridge";
+export function Message({ job }:{ job:Job }) { return <article className="job"><div><span className="eyebrow">{job.kind} / {job.id.slice(0, 8)}</span><p>{job.user_prompt}</p></div><div className="job-meta"><span className="job-status"><i className={`dot ${job.status === "completed" ? "ready" : ""}`} />{job.status}</span>{job.error && <div className="error">{job.error}</div>}</div></article>; }

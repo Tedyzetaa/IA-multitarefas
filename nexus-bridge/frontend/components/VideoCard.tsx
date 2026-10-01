@@ -1,0 +1,2 @@
+import { artifactUrl, type Job } from "@/lib/nexusBridge";
+export function VideoCard({ job }:{ job:Job }) { const source = job.file_path ? artifactUrl(job) : undefined; return <div className="artifact"><span className="eyebrow">{job.status === "completed" ? "Vídeo pronto" : "Render em andamento"}</span>{source ? <video src={source} controls /> : <div className="skeleton">Aguardando conclusão do job...</div>}</div>; }

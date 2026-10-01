@@ -1,0 +1,420 @@
+--- orig/app/config.py	2026-09-18 19:18:50.991184207 +0000
++++ work2/app/config.py	2026-09-18 19:14:27.549774007 +0000
+@@ -108,6 +108,32 @@
+     DEFAULT_PROVIDER_TIMEOUT_S: int = 120
+     DUBBING_BACKGROUND_THRESHOLD_BYTES: int = 10 * 1024 * 1024
+ 
++    # --- Dublagem por traducao local (XTTS v2 + faster-whisper + Ollama) ---
++    # Modo default do endpoint de dublagem: "translation_dubbing" preserva a
++    # voz original do falante e TRADUZ o audio (hoje fixado para entrada em
++    # ingles -> saida em portugues); "voice_conversion" e o Speech-to-Speech
++    # da ElevenLabs (troca a voz, NAO traduz).
++    DUBBING_DEFAULT_MODE: str = "translation_dubbing"
++
++    # XTTS v2 roda DENTRO do processo do nexus-bridge (torch). Requer uma venv
++    # com Python < 3.14 (coqui-tts hoje so suporta >=3.10,<3.14) e o pacote
++    # "coqui-tts" instalado -- ver requirements.txt.
++    XTTS_MODEL_NAME: str = "tts_models/multilingual/multi-dataset/xtts_v2"
++    XTTS_DEVICE: str = "auto"  # "auto" | "cuda" | "cpu"
++
++    # faster-whisper para transcrever o audio de entrada antes da traducao.
++    # "small" e um bom equilibrio para ingles numa RTX 3050 6GB, dado que o
++    # modelo e carregado/descarregado por job (nunca fica residente junto
++    # com XTTS/Ollama/Fooocus -- ver app/providers/whisper_stt.py).
++    WHISPER_MODEL_SIZE: str = "small"
++    WHISPER_DEVICE: str = "auto"  # "auto" | "cuda" | "cpu"
++    WHISPER_SOURCE_LANGUAGE: str = "en"  # idioma de entrada fixo (nao detectado automaticamente)
++
++    # Traducao do texto transcrito: reaproveita o Ollama ja configurado acima
++    # (OLLAMA_HOST/OLLAMA_MODEL). Deixe em branco para usar OLLAMA_MODEL.
++    TRANSLATION_OLLAMA_MODEL: str = ""
++    TRANSLATION_TARGET_LANGUAGE: str = "pt"  # codigo curto aceito pelo XTTS v2 (nao "pt-BR")
++
+     # --- API ---
+     # NoDecode: sem isso o pydantic-settings tenta json.loads() no valor do .env ANTES do
+     # validator abaixo e quebra com "error parsing value for field CORS_ORIGINS" quando o
+--- orig/app/models.py	2026-09-18 19:18:50.991562913 +0000
++++ work2/app/models.py	2026-09-18 19:14:37.842008270 +0000
+@@ -65,13 +65,24 @@
+ 
+ 
+ class DubbingRequest(BaseModel):
+-    """Requisição do fluxo de dublagem em Speech-to-Speech."""
+-    voice_id: str = Field(..., min_length=3, max_length=200)
++    """Requisição do fluxo de dublagem.
++
++    dubbing_mode escolhe a ESTRATÉGIA:
++    - "translation_dubbing" (default): preserva a voz original do falante e
++      TRADUZ o áudio (pipeline local: faster-whisper -> Ollama -> XTTS v2).
++      voice_id não é usado nesse modo.
++    - "voice_conversion": Speech-to-Speech da ElevenLabs (troca a voz, NÃO
++      traduz). Requer voice_id.
++    """
++    dubbing_mode: Literal["voice_conversion", "translation_dubbing"] = "translation_dubbing"
++    voice_id: Optional[str] = Field(default=None, min_length=3, max_length=200)
+     file_name: Optional[str] = None
+     format: Literal["wav", "mp3", "m4a"] = "wav"
+     output_format: Literal["wav", "mp3", "m4a"] = "mp3"
+     model_id: str = "eleven_multilingual_v2"
+     provider: Literal["elevenlabs", "local_flow_matching"] = "elevenlabs"
++    # Idioma de origem do audio (usado pelo whisper no modo translation_dubbing).
++    source_language: Optional[str] = "en"
+     target_language: Optional[str] = None
+     language_code: Optional[str] = None
+     # exclude=True: os bytes do audio NUNCA entram na serializacao do Job
+@@ -82,6 +93,8 @@
+ 
+     @model_validator(mode="after")
+     def validate_format(self):
++        if self.dubbing_mode == "voice_conversion" and not (self.voice_id or "").strip():
++            raise ValueError("voice_id é obrigatório quando dubbing_mode='voice_conversion'.")
+         if self.file_name:
+             suffix = self.file_name.rsplit(".", 1)[-1].lower()
+             if suffix and suffix not in {"wav", "mp3", "m4a"}:
+--- orig/app/main.py	2026-09-18 19:18:50.991400470 +0000
++++ work2/app/main.py	2026-09-18 19:17:10.736033316 +0000
+@@ -23,6 +23,7 @@
+ from app.providers.comfyui_provider import ComfyUIImageProvider
+ from app.providers.comfyui_video_provider import ComfyUIVideoProvider
+ from app.providers.dubbing_provider import DubbingProvider
++from app.providers.translation_dubbing_provider import TranslationDubbingProvider
+ from app.providers.ollama_provider import OllamaProvider
+ from app.providers.base import ProviderUnavailableError, ResourceExhaustedError
+ from app.queue_manager import QueueManager
+@@ -55,9 +56,25 @@
+     host=settings.ELEVENLABS_HOST,
+     timeout_s=settings.ELEVENLABS_TIMEOUT_S,
+ )
+-orchestrator = NexusOrchestrator(llm_provider, image_provider, video_provider, dubbing_provider)
++# translation_dubbing (modo default) reaproveita o MESMO OllamaProvider usado
++# no refinamento de prompt de imagem/video -- um so cliente Ollama no processo.
++translation_dubbing_provider = TranslationDubbingProvider(llm_provider=llm_provider)
++orchestrator = NexusOrchestrator(
++    llm_provider, image_provider, video_provider,
++    dubbing_provider=dubbing_provider,
++    translation_dubbing_provider=translation_dubbing_provider,
++)
+ queue_manager = QueueManager(orchestrator)
+ 
++def _default_dubbing_strategy():
++    """Estrategia de dublagem usada nos health checks agregados (/api/status, /api/health,
++    startup). Reflete settings.DUBBING_DEFAULT_MODE -- um request individual pode escolher
++    a outra estrategia via dubbing_mode, mas os health checks agregados mostram o default."""
++    if settings.DUBBING_DEFAULT_MODE == "voice_conversion":
++        return dubbing_provider
++    return translation_dubbing_provider
++
++
+ app.mount("/images", StaticFiles(directory=str(settings.OUTPUT_DIR)), name="images")
+ app.mount("/videos", StaticFiles(directory=str(settings.OUTPUT_DIR_VIDEOS)), name="videos")
+ app.mount("/audio", StaticFiles(directory=str(settings.OUTPUT_DIR_AUDIO)), name="audio")
+@@ -125,7 +142,7 @@
+     ollama_ok = await llm_provider.health_check()
+     fooocus_ok = await image_provider.health_check()
+     ltx_ok = await video_provider.health_check()
+-    dubbing_ok = await dubbing_provider.health_check()
++    dubbing_ok = await _default_dubbing_strategy().health_check()
+     await status_manager.set_ollama("ready" if ollama_ok else "offline")
+     await status_manager.set_fooocus("ready" if fooocus_ok else "offline")
+     await status_manager.set_ltx_video("ready" if ltx_ok else "offline")
+@@ -177,7 +194,7 @@
+     live_ollama = await llm_provider.health_check()
+     live_fooocus = await image_provider.health_check()
+     live_ltx = await video_provider.health_check()
+-    live_dubbing = await dubbing_provider.health_check()
++    live_dubbing = await _default_dubbing_strategy().health_check()
+     await status_manager.set_ollama("ready" if live_ollama else "offline")
+     await status_manager.set_fooocus("ready" if live_fooocus else "offline")
+     await status_manager.set_ltx_video("ready" if live_ltx else "offline")
+@@ -197,7 +214,7 @@
+     ollama_ready, ollama_detail = await llm_provider.model_ready()
+     fooocus_ok = await image_provider.health_check()
+     ltx_ok = await video_provider.health_check()
+-    dubbing_ok = await dubbing_provider.health_check()
++    dubbing_ok = await _default_dubbing_strategy().health_check()
+     free_vram = get_free_vram_mb()
+ 
+     # LTX-Video fica FORA do overall_ok de proposito: e um recurso opcional,
+@@ -222,6 +239,8 @@
+ @app.post("/api/v1/dubbing/process", response_model=DubbingResponse)
+ async def process_dubbing(
+     file: UploadFile = File(...),
++    dubbing_mode: Optional[str] = Form(None),
++    source_language: Optional[str] = Form("en"),
+     target_language: Optional[str] = Form("pt-BR"),
+     provider: Optional[str] = Form("elevenlabs"),
+     voice_id: Optional[str] = Form(None),
+@@ -233,7 +252,12 @@
+     speaker_boost: bool = Form(True),
+     output_format: str = Form("mp3"),
+ ):
+-    """Endpoint de dublagem (Speech-to-Speech) com upload de áudio.
++    """Endpoint de dublagem com upload de áudio.
++
++    dubbing_mode escolhe a estratégia (default: settings.DUBBING_DEFAULT_MODE =
++    "translation_dubbing" -- preserva a voz original e TRADUZ o áudio via pipeline
++    local whisper->Ollama->XTTS v2). "voice_conversion" usa o Speech-to-Speech da
++    ElevenLabs (troca a voz, NÃO traduz) e nesse caso voice_id é obrigatório.
+ 
+     Arquivos >= DUBBING_BACKGROUND_THRESHOLD_BYTES vão para a fila (retorna job_id para polling
+     em /api/jobs/{job_id}); menores são processados de forma síncrona.
+@@ -242,12 +266,20 @@
+     # CORSMiddleware e, num fetch direto do browser, vira "Failed to fetch" sem mensagem.
+     # HTTPException passa pelo CORS e chega ao cliente com o corpo JSON legível.
+     try:
++        resolved_mode = (dubbing_mode or settings.DUBBING_DEFAULT_MODE or "translation_dubbing").strip()
++        if resolved_mode not in {"voice_conversion", "translation_dubbing"}:
++            raise HTTPException(
++                status_code=400,
++                detail=f"dubbing_mode inválido: {resolved_mode!r}. Use 'voice_conversion' ou 'translation_dubbing'.",
++            )
++
+         voice_id = (voice_id or "").strip() or settings.ELEVENLABS_DEFAULT_VOICE_ID.strip()
+-        if not voice_id:
++        if resolved_mode == "voice_conversion" and not voice_id:
+             raise HTTPException(
+                 status_code=400,
+                 detail="Informe o voice_id da ElevenLabs (campo 'voice_id') ou defina "
+-                       "ELEVENLABS_DEFAULT_VOICE_ID no .env do nexus-bridge.",
++                       "ELEVENLABS_DEFAULT_VOICE_ID no .env do nexus-bridge (obrigatório "
++                       "apenas em dubbing_mode='voice_conversion').",
+             )
+ 
+         name = (file.filename or "audio").lower()
+@@ -262,12 +294,14 @@
+ 
+         try:
+             request = DubbingRequest(
+-                voice_id=voice_id,
++                dubbing_mode=resolved_mode,
++                voice_id=voice_id or None,
+                 file_name=file.filename or name,
+                 format=suffix,
+                 output_format=output_format.lower(),
+                 model_id=model_id or settings.ELEVENLABS_DEFAULT_MODEL,
+                 provider=provider or "elevenlabs",
++                source_language=source_language,
+                 target_language=target_language,
+                 language_code=language_code,
+                 file_content=raw_audio,
+@@ -281,26 +315,31 @@
+         except ValueError as exc:  # pydantic.ValidationError herda de ValueError
+             raise HTTPException(status_code=422, detail=f"Parâmetros de dublagem inválidos: {exc}") from exc
+ 
++        job_label = voice_id if resolved_mode == "voice_conversion" else "voz original (traduzido)"
+         if len(raw_audio) >= settings.DUBBING_BACKGROUND_THRESHOLD_BYTES:
+-            job = Job(user_prompt=f"Dublagem para {voice_id}", request=request, kind="audio")
++            job = Job(user_prompt=f"Dublagem ({resolved_mode}) para {job_label}", request=request, kind="audio")
+             await queue_manager.enqueue(job)
+             return DubbingResponse(
+                 job_id=job.id,
+                 provider=request.provider,
+                 output_format=request.output_format,
+                 message="Arquivo em processamento em background. Consulte o job em /api/jobs/{job_id}.",
+-                voice_id=request.voice_id,
++                voice_id=request.voice_id or "",
+             )
+ 
+-        output_path = Path(await dubbing_provider.generate(raw_audio, request))
++        strategy = dubbing_provider if resolved_mode == "voice_conversion" else translation_dubbing_provider
++        output_path = Path(await strategy.generate(raw_audio, request))
++        # translation_dubbing (XTTS v2) sempre grava .wav, independente do output_format
++        # pedido -- refletir a extensao REAL do arquivo gerado na resposta.
++        actual_format = output_path.suffix.lstrip(".").lower() or request.output_format
+         return DubbingResponse(
+             job_id=str(uuid.uuid4()),
+             provider=request.provider,
+-            output_format=request.output_format,
++            output_format=actual_format if actual_format in {"wav", "mp3", "m4a"} else request.output_format,
+             file_path=str(output_path),
+             audio_url=f"/audio/{output_path.name}",
+             message="Dublagem concluída com sucesso.",
+-            voice_id=request.voice_id,
++            voice_id=request.voice_id or "",
+             bytes_written=output_path.stat().st_size,
+         )
+ 
+--- orig/app/services/orchestrator.py	2026-09-18 19:18:51.011992115 +0000
++++ work2/app/services/orchestrator.py	2026-09-18 19:16:07.429937998 +0000
+@@ -16,6 +16,7 @@
+ from app.resource_manager import generate_image_with_guard, generate_video_with_guard
+ from app.status_manager import status_manager
+ from app.providers.dubbing_provider import DubbingProvider
++from app.providers.translation_dubbing_provider import TranslationDubbingProvider
+ 
+ logger = logging.getLogger("nexus.orchestrator")
+ 
+@@ -23,14 +24,25 @@
+ class NexusOrchestrator:
+     def __init__(self, llm_provider: LLMProvider, image_provider: ImageProvider,
+                  video_provider: VideoProvider | None = None,
+-                 dubbing_provider: DubbingProvider | None = None):
++                 dubbing_provider: DubbingProvider | None = None,
++                 translation_dubbing_provider: TranslationDubbingProvider | None = None):
+         self.llm = llm_provider
+         self.image = image_provider
+         # Opcional de proposito: um deploy pode nao ter LTX-Video configurado
+         # (ex: sem GPU suficiente). Jobs kind="video" falham com uma mensagem
+         # clara nesse caso, em vez do sistema inteiro exigir o provider.
+         self.video = video_provider
++        # Duas ESTRATEGIAS de dublagem, selecionadas por job.request.dubbing_mode:
++        # "voice_conversion" -> ElevenLabs Speech-to-Speech (troca a voz, nao traduz)
++        # "translation_dubbing" -> pipeline local whisper->Ollama->XTTS (traduz, preserva a voz)
+         self.dubbing = dubbing_provider
++        self.translation_dubbing = translation_dubbing_provider
++
++    def _select_dubbing_strategy(self, request):
++        mode = getattr(request, "dubbing_mode", "translation_dubbing")
++        if mode == "voice_conversion":
++            return self.dubbing
++        return self.translation_dubbing
+ 
+     async def run(self, job: Job) -> Job:
+         try:
+@@ -86,26 +98,29 @@
+                 )
+                 await status_manager.set_ltx_video("ready")
+             elif job.kind == "audio":
+-                if self.dubbing is None:
++                if job.request is None:
++                    raise ProviderUnavailableError("Request de dublagem ausente no job.")
++
++                strategy = self._select_dubbing_strategy(job.request)
++                if strategy is None:
+                     raise ProviderUnavailableError(
+-                        "Job de áudio recebido, mas nenhum DubbingProvider foi injetado no orchestrator."
++                        f"Job de áudio (dubbing_mode={getattr(job.request, 'dubbing_mode', '?')!r}) "
++                        "recebido, mas nenhum provider correspondente foi injetado no orchestrator."
+                     )
+-                if job.request is None or not hasattr(job.request, "voice_id"):
+-                    raise ProviderUnavailableError("Request de dublagem inválido: voice_id ausente.")
+ 
+                 job.status = JobStatus.GENERATING_AUDIO
+                 await status_manager.set_dubbing("busy")
+-                logger.info("[Orchestrator] Encaminhando áudio para o provedor de dublagem (%s)...", type(self.dubbing).__name__)
++                logger.info("[Orchestrator] Encaminhando áudio para %s...", type(strategy).__name__)
+ 
+                 audio_bytes = job.request.file_content if hasattr(job.request, "file_content") else b""
+                 if not audio_bytes:
+                     raise ProviderUnavailableError("Arquivo de áudio indisponível para processamento de dublagem.")
+ 
+-                # process() devolve BYTES; o codigo antigo descartava o resultado
+-                # (isinstance(result, str) era sempre False). generate() grava em disco.
+-                job.file_path = await self.dubbing.generate(audio_bytes, job.request)
+-                job.refined_prompt = f"Dublagem via {self.dubbing.provider_name} para {job.request.voice_id}"
+-                await status_manager.set_dubbing("ready")
++                job.file_path = await strategy.generate(audio_bytes, job.request)
++                voice_label = job.request.voice_id if job.request.dubbing_mode == "voice_conversion" else "voz original (clonada)"
++                job.refined_prompt = f"Dublagem via {strategy.provider_name} ({job.request.dubbing_mode}) para {voice_label}"
++                # O estado real e confirmado no finally (health_check da estrategia usada),
++                # em vez de forcar "ready" aqui -- ver bug corrigido abaixo.
+             else:
+                 job.status = JobStatus.GENERATING_IMAGE
+                 logger.info(
+@@ -139,7 +154,17 @@
+             await status_manager.set_fooocus("ready")
+             if self.video is not None:
+                 await status_manager.set_ltx_video("ready")
+-            await status_manager.set_dubbing("ready")
++            if job.kind == "audio":
++                # ANTES: forcava set_dubbing("ready") sempre, escondendo um provider
++                # offline/401 (ex: chave da ElevenLabs invalida). Agora reflete o
++                # health_check() real da estrategia usada neste job.
++                strategy = self._select_dubbing_strategy(job.request) if job.request is not None else None
++                try:
++                    dubbing_ok = await strategy.health_check() if strategy is not None else False
++                except Exception:
++                    logger.exception("Falha ao checar health_check() da estrategia de dublagem")
++                    dubbing_ok = False
++                await status_manager.set_dubbing("ready" if dubbing_ok else "offline")
+             await status_manager.set_processing(None)
+ 
+         return job
+--- orig/app/providers/ollama_provider.py	2026-09-18 19:18:51.011146309 +0000
++++ work2/app/providers/ollama_provider.py	2026-09-18 19:14:49.033890075 +0000
+@@ -13,6 +13,13 @@
+     "sem markdown, em uma unica linha."
+ )
+ 
++TRANSLATION_SYSTEM_PROMPT_TEMPLATE = (
++    "You are a professional subtitle/dubbing translator. Translate the user's text from "
++    "{source_lang} to {target_lang}. Preserve meaning, tone and register; keep it natural "
++    "for spoken narration (this text will be fed to a text-to-speech engine). "
++    "Output ONLY the translated text, nothing else -- no explanations, no quotes, no markdown."
++)
++
+ REFINEMENT_SYSTEM_PROMPT_VIDEO = """You are a prompt writer for an image-to-video AI model (LTX-Video).
+ The source image is always a top-down flat-lay product photo (e.g. bedding laid flat on a bed, seen from above). Rewrite the user's product description into a SHORT, literal video prompt.
+ 
+@@ -72,6 +79,49 @@
+                 f"Ollama respondeu com erro {e.response.status_code}: {e}"
+             ) from e
+ 
++    async def translate_text(self, text: str, source_lang: str, target_lang: str, model: str | None = None) -> str:
++        """Traduz `text` de source_lang para target_lang reaproveitando o Ollama.
++
++        Usado pelo pipeline de translation_dubbing (app/providers/translation_dubbing_provider.py)
++        para traduzir a transcricao do whisper antes de sintetizar com XTTS v2.
++        model permite sobrescrever settings.OLLAMA_MODEL (ex: settings.TRANSLATION_OLLAMA_MODEL).
++        """
++        if not text or not text.strip():
++            raise ValueError("Texto vazio para traducao.")
++        system_prompt = TRANSLATION_SYSTEM_PROMPT_TEMPLATE.format(
++            source_lang=source_lang, target_lang=target_lang
++        )
++        payload = {
++            "model": model or self.model,
++            "messages": [
++                {"role": "system", "content": system_prompt},
++                {"role": "user", "content": text},
++            ],
++            "stream": False,
++            "keep_alive": settings.OLLAMA_KEEP_ALIVE_ACTIVE,
++            "options": {"num_ctx": settings.OLLAMA_NUM_CTX},
++        }
++        try:
++            async with httpx.AsyncClient(timeout=120) as client:
++                resp = await client.post(f"{self.host}/api/chat", json=payload)
++                resp.raise_for_status()
++                data = resp.json()
++                translated = data.get("message", {}).get("content", "").strip()
++                if not translated:
++                    raise ProviderUnavailableError("Ollama devolveu tradução vazia.")
++                return translated
++        except (httpx.ConnectError, httpx.TimeoutException) as e:
++            raise ProviderUnavailableError(f"Ollama indisponivel para traducao: {e}") from e
++        except httpx.HTTPStatusError as e:
++            if e.response.status_code == 404:
++                raise ProviderUnavailableError(
++                    f"Modelo '{model or self.model}' nao encontrado no Ollama ({self.host}) "
++                    f"para traducao. Rode 'ollama list' e confira TRANSLATION_OLLAMA_MODEL/OLLAMA_MODEL."
++                ) from e
++            raise ProviderUnavailableError(
++                f"Ollama respondeu com erro {e.response.status_code} na traducao: {e}"
++            ) from e
++
+     async def clear_context(self) -> None:
+         """
+         Nao mantemos historico de conversa entre chamadas (cada refine_prompt e
+--- orig/requirements.txt	2026-09-18 19:18:50.972021755 +0000
++++ work2/requirements.txt	2026-09-18 19:17:20.358794617 +0000
+@@ -18,5 +18,18 @@
+ websockets>=12.0
+ requests>=2.31.0
+ 
++# --- Dublagem por tradução local (translation_dubbing: whisper -> Ollama -> XTTS v2) ---
++# REQUER Python < 3.14 (limite atual do coqui-tts) -- recrie a venv em 3.12 antes de instalar.
++faster-whisper>=1.0.0
++coqui-tts>=0.27.0
++# torch/torchaudio: NAO fixamos a wheel de CUDA aqui de propósito -- a build certa
++# depende do seu driver NVIDIA. Instale ANTES do resto seguindo
++# https://pytorch.org/get-started/locally/ (escolha CUDA 12.x compatível com seu driver),
++# senão o pip vai puxar a wheel CPU-only e tudo (whisper + XTTS) vai rodar em CPU (lento).
++# Exemplo (ajuste cu121/cu124 conforme seu driver):
++#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
++torch>=2.1.0
++torchaudio>=2.1.0
++
+ # Testes
+ pytest>=8.0.0
+\ No newline at end of file
