@@ -52,3 +52,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+generated_videos/
+generated_audio/
+nexus-bridge/generated_videos/
+nexus-bridge/generated_audio/
