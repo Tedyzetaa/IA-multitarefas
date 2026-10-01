@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { ChevronDown, Cpu } from "lucide-react";
-import { fetchOllamaModels } from "@/hooks/useOllamaStream";
+import { fetchOllamaModels, getOllamaBaseUrl } from "@/hooks/useOllamaStream";
 
 interface ModelSelectorProps {
   selectedModel: string;
@@ -61,8 +61,8 @@ export default function ModelSelector({
           <div className="absolute left-0 top-full mt-1 w-64 z-20 rounded-lg border border-border-light dark:border-border-dark bg-surface-light-raised dark:bg-surface-dark-raised shadow-lg overflow-hidden">
             {error && (
               <p className="px-3 py-2 text-xs text-red-500">
-                {error}. Verifique se o Ollama está rodando em
-                127.0.0.1:11434.
+                {error}. Verifique se o Ollama está rodando em{" "}
+                {getOllamaBaseUrl()}.
               </p>
             )}
             {!error && models.length === 0 && !loading && (

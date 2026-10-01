@@ -1,10 +1,17 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { ChatMessage, OllamaChatStreamChunk, Role } from "@/lib/types";
+import { OllamaApiMessage, OllamaChatStreamChunk } from "@/lib/types";
+import { loadSettings } from "@/lib/settings";
 
-const OLLAMA_BASE_URL =
+const DEFAULT_OLLAMA_URL =
   process.env.NEXT_PUBLIC_OLLAMA_URL || "http://127.0.0.1:11434";
+
+/** URL efetiva: settings do usuário (Configurações) tem prioridade sobre o env var. */
+export function getOllamaBaseUrl(): string {
+  const custom = loadSettings().ollamaUrl?.trim();
+  return custom ? custom.replace(/\/+$/, "") : DEFAULT_OLLAMA_URL;
+}
 
 interface StreamCallbacks {
   /** chamado a cada novo pedaço de texto recebido (delta), já acumulado */
@@ -15,8 +22,16 @@ interface StreamCallbacks {
 
 interface SendOptions {
   model: string;
-  /** histórico completo, incluindo a mensagem do usuário mais recente */
-  messages: Pick<ChatMessage, "role" | "content">[];
+  /**
+   * Histórico completo já no formato de payload do Ollama, incluindo a
+   * mensagem do usuário mais recente. Cada mensagem pode trazer `images`
+   * (base64) para suportar modelos multimodais.
+   */
+  messages: OllamaApiMessage[];
+  /** system prompt opcional, injetado como primeira mensagem "system" */
+  systemPrompt?: string;
+  /** temperatura de amostragem (criatividade). Padrão do Ollama se omitido. */
+  temperature?: number;
 }
 
 /**
@@ -38,28 +53,46 @@ export function useOllamaStream() {
   }, []);
 
   const send = useCallback(
-    async ({ model, messages }: SendOptions, callbacks: StreamCallbacks) => {
+    async (
+      { model, messages, systemPrompt, temperature }: SendOptions,
+      callbacks: StreamCallbacks
+    ) => {
       const controller = new AbortController();
       abortRef.current = controller;
       setIsStreaming(true);
 
+      const baseUrl = getOllamaBaseUrl();
+      const payloadMessages = systemPrompt?.trim()
+        ? [{ role: "system" as const, content: systemPrompt.trim() }, ...messages]
+        : messages;
+
+      // Remove propriedade 'images' de cada mensagem antes de enviar ao Ollama,
+      // pois o Llama 3.1 não suporta imagens
+      const cleanedMessages = payloadMessages.map(({ role, content }) => ({
+        role,
+        content,
+      }));
+
       let fullText = "";
 
       try {
-        const res = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        const res = await fetch(`${baseUrl}/api/chat`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           signal: controller.signal,
           body: JSON.stringify({
             model,
-            messages,
+            messages: cleanedMessages,
             stream: true,
+            ...(typeof temperature === "number"
+              ? { options: { temperature } }
+              : {}),
           }),
         });
 
         if (!res.ok || !res.body) {
           throw new Error(
-            `Ollama respondeu com status ${res.status}. O serviço está rodando em ${OLLAMA_BASE_URL}?`
+            `Ollama respondeu com status ${res.status}. O serviço está rodando em ${baseUrl}?`
           );
         }
 
@@ -132,7 +165,7 @@ export function useOllamaStream() {
 export async function fetchOllamaModels(): Promise<
   { name: string; details?: Record<string, unknown> }[]
 > {
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
+  const res = await fetch(`${getOllamaBaseUrl()}/api/tags`);
   if (!res.ok) throw new Error("Não foi possível listar os modelos do Ollama.");
   const data = await res.json();
   return data.models ?? [];

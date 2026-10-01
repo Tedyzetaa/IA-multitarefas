@@ -1,0 +1,303 @@
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/components/AudioDubber.tsx web/components/AudioDubber.tsx
+--- a/components/AudioDubber.tsx	2026-09-18 18:53:24.612529767 +0000
++++ b/components/AudioDubber.tsx	2026-09-18 18:53:57.258705079 +0000
+@@ -13,7 +13,7 @@
+   Wand2,
+ } from "lucide-react";
+ import { useAudioDubbing } from "@/hooks/useAudioDubbing";
+-import { loadSettings } from "@/lib/settings";
++import { loadSettings, saveSettings } from "@/lib/settings";
+ import { toast } from "@/lib/toast";
+ import {
+   AudioDubbingSettings,
+@@ -24,7 +24,8 @@
+ 
+ const DEFAULT_SETTINGS: AudioDubbingSettings = {
+   targetLanguage: "pt-BR",
+-  voiceProvider: "openai",
++  voiceProvider: "elevenlabs",
++  voiceId: "",
+   stability: 0.72,
+   similarityBoost: 0.88,
+ };
+@@ -41,9 +42,7 @@
+ ];
+ 
+ const providerOptions: { label: string; value: AudioVoiceProvider }[] = [
+-  { label: "OpenAI", value: "openai" },
+   { label: "ElevenLabs", value: "elevenlabs" },
+-  { label: "Azure", value: "azure" },
+ ];
+ 
+ const STATUS_META: Record<
+@@ -168,6 +167,8 @@
+       return;
+     }
+ 
++    // persiste voice_id/ajustes para a próxima sessão
++    saveSettings({ ...loadSettings(), audioDubbing: settings });
+     await process(selectedFile, settings);
+   };
+ 
+@@ -388,6 +389,19 @@
+                     </select>
+                   </label>
+ 
++                  <label className="block">
++                    <span className="mb-1.5 block text-xs font-medium text-ink-muted uppercase tracking-wide">Voice ID</span>
++                    <input
++                      type="text"
++                      value={settings.voiceId}
++                      onChange={(event) =>
++                        setSettings((prev) => ({ ...prev, voiceId: event.target.value.trim() }))
++                      }
++                      placeholder="ex.: JBFqnCBsd6RMkjVDRZzb"
++                      className="w-full rounded-xl border border-border-light bg-surface-light-raised px-3 py-2.5 text-sm text-ink-light outline-none transition focus:border-accent dark:border-border-dark dark:bg-surface-dark-raised dark:text-ink-dark"
++                    />
++                  </label>
++
+                   <div>
+                     <div className="mb-1.5 flex items-center justify-between text-xs font-medium text-ink-muted uppercase tracking-wide">
+                       <span>Estabilidade</span>
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/components/SettingsModal.tsx web/components/SettingsModal.tsx
+--- a/components/SettingsModal.tsx	2026-09-18 18:53:24.612663819 +0000
++++ b/components/SettingsModal.tsx	2026-09-18 18:53:57.258456311 +0000
+@@ -421,12 +421,28 @@
+                   }
+                   className="w-full px-3 py-2 rounded-lg border border-border-light dark:border-border-dark bg-surface-light dark:bg-surface-dark text-sm outline-none focus:border-accent"
+                 >
+-                  <option value="openai">OpenAI</option>
+                   <option value="elevenlabs">ElevenLabs</option>
+-                  <option value="azure">Azure</option>
+                 </select>
+               </label>
+ 
++              <label className="block">
++                <span className="mb-1.5 block text-[11px] text-ink-muted uppercase tracking-wide">
++                  Voice ID (ElevenLabs)
++                </span>
++                <input
++                  type="text"
++                  value={settings.audioDubbing.voiceId ?? ""}
++                  onChange={(e) =>
++                    setSettings((s) => ({
++                      ...s,
++                      audioDubbing: { ...s.audioDubbing, voiceId: e.target.value.trim() },
++                    }))
++                  }
++                  placeholder="ex.: JBFqnCBsd6RMkjVDRZzb"
++                  className="w-full px-3 py-2 rounded-lg border border-border-light dark:border-border-dark bg-surface-light dark:bg-surface-dark text-sm outline-none focus:border-accent"
++                />
++              </label>
++
+               <div>
+                 <div className="mb-1.5 flex items-center justify-between text-[11px] text-ink-muted uppercase tracking-wide">
+                   <span>Estabilidade</span>
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/lib/nexusBridge.ts web/lib/nexusBridge.ts
+--- a/lib/nexusBridge.ts	2026-09-18 18:53:24.612901798 +0000
++++ b/lib/nexusBridge.ts	2026-09-18 18:54:25.264739002 +0000
+@@ -241,14 +241,86 @@
+  */
+ export const pollJob = pollVideoJob;
+ 
++/** Mesma lógica de imageUrlFromFilePath, para os arquivos servidos em
++ * StaticFiles("/audio") (ver app/main.py -- settings.OUTPUT_DIR_AUDIO). */
++export function audioUrlFromFilePath(filePath: string): string {
++  const filename = filePath.split(/[\\/]/).pop();
++  return `${NEXUS_BASE_URL}/audio/${filename}`;
++}
++
++/**
++ * Transforma a resposta de erro do nexus-bridge em texto legível. O backend
++ * devolve JSON ({ detail: string | [{loc,msg}], hint? }); o proxy do Next
++ * devolve texto puro ("Internal Server Error") quando ele mesmo falha.
++ */
++async function readErrorMessage(res: Response): Promise<string> {
++  const text = await res.text().catch(() => "");
++  try {
++    const json = JSON.parse(text) as {
++      detail?: string | { loc?: (string | number)[]; msg?: string }[];
++      error?: string;
++      hint?: string | null;
++    };
++    let msg: string;
++    if (typeof json.detail === "string") {
++      msg = json.detail;
++    } else if (Array.isArray(json.detail)) {
++      msg = json.detail
++        .map((e) => `${(e.loc ?? []).filter((p) => p !== "body").join(".")}: ${e.msg}`)
++        .join("; ");
++    } else {
++      msg = json.error ?? text;
++    }
++    return (json.hint ? `${msg} — ${json.hint}` : msg).slice(0, 500);
++  } catch {
++    return text.slice(0, 300);
++  }
++}
++
++/** Espera um job terminar (promessa em cima do pollJob). */
++function waitForJob(jobId: string): Promise<NexusJob> {
++  return new Promise((resolve) => {
++    pollVideoJob(jobId, () => {}, resolve);
++  });
++}
++
++/** Resposta de POST /api/v1/dubbing/process (app/models.py::DubbingResponse). */
++interface DubbingApiResponse {
++  job_id: string;
++  audio_url?: string | null;
++  file_path?: string | null;
++  message?: string;
++}
++
++/**
++ * Envia o áudio para o nexus-bridge (Speech-to-Speech / ElevenLabs).
++ *
++ * - Arquivos < DUBBING_BACKGROUND_THRESHOLD_BYTES (10MB) voltam prontos (`audio_url`).
++ * - Arquivos maiores voltam só com `job_id`: acompanhamos o job até terminar.
++ *
++ * Só anexamos campos com valor: `formData.append("x", undefined)` vira a string
++ * "undefined" e o FastAPI responde 422 (ex.: "stability: unable to parse string as a number").
++ * NÃO definir Content-Type manualmente -- o navegador precisa gerar o boundary.
++ */
+ export async function processAudioDubbing(
+   file: File,
+   settings: AudioDubbingSettings
+ ): Promise<AudioDubbingResult> {
+   const formData = new FormData();
+-  formData.append("file", file, file.name);
+-  formData.append("target_language", settings.targetLanguage);
+-  formData.append("provider", settings.voiceProvider);
++  formData.append("file", file, file.name); // o nome do campo TEM que ser "file"
++
++  const fields: Record<string, string | undefined> = {
++    voice_id: settings.voiceId?.trim() || undefined,
++    provider: "elevenlabs", // único provider implementado no backend
++    target_language: settings.targetLanguage,
++    stability: Number.isFinite(settings.stability) ? String(settings.stability) : undefined,
++    similarity_boost: Number.isFinite(settings.similarityBoost)
++      ? String(settings.similarityBoost)
++      : undefined,
++  };
++  for (const [key, value] of Object.entries(fields)) {
++    if (value) formData.append(key, value);
++  }
+ 
+   const res = await fetch(`${NEXUS_BASE_URL}/api/v1/dubbing/process`, {
+     method: "POST",
+@@ -256,22 +328,36 @@
+   });
+ 
+   if (!res.ok) {
+-    const detail = await res.text().catch(() => "");
+     throw new Error(
+-      `nexus-bridge respondeu ${res.status} em /api/v1/dubbing/process: ${detail.slice(0, 300)}`
++      `nexus-bridge respondeu ${res.status} em /api/v1/dubbing/process: ${await readErrorMessage(res)}`
+     );
+   }
+ 
+-  const json = (await res.json()) as Partial<AudioDubbingResult> | { result?: Partial<AudioDubbingResult> };
+-  const body = "result" in json && json.result ? json.result : json;
+-  const normalized = body as Partial<AudioDubbingResult>;
++  const data = (await res.json()) as DubbingApiResponse;
++
++  // Caminho síncrono: o áudio já está pronto.
++  if (data.audio_url) {
++    return {
++      status: "success",
++      progress: 100,
++      dubbedUrl: `${NEXUS_BASE_URL}${data.audio_url}`,
++      fileName: data.audio_url.split("/").pop(),
++    };
++  }
+ 
++  // Caminho em background (arquivo grande): acompanha o job até concluir.
++  const job = await waitForJob(data.job_id);
++  if (job.status === "failed" || !job.file_path) {
++    return {
++      status: "error",
++      progress: 0,
++      error: job.error ?? "A dublagem terminou sem gerar o arquivo de áudio.",
++    };
++  }
+   return {
+-    status: normalized.status ?? "success",
+-    progress: normalized.progress ?? 100,
+-    originalUrl: normalized.originalUrl,
+-    dubbedUrl: normalized.dubbedUrl,
+-    fileName: normalized.fileName,
+-    error: normalized.error,
++    status: "success",
++    progress: 100,
++    dubbedUrl: audioUrlFromFilePath(job.file_path),
++    fileName: job.file_path.split(/[\\/]/).pop(),
+   };
+ }
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/lib/settings.ts web/lib/settings.ts
+--- a/lib/settings.ts	2026-09-18 18:53:24.612927127 +0000
++++ b/lib/settings.ts	2026-09-18 18:53:57.258223138 +0000
+@@ -67,7 +67,8 @@
+   video: SAFE_VIDEO_SETTINGS,
+   audioDubbing: {
+     targetLanguage: "pt-BR",
+-    voiceProvider: "openai",
++    voiceProvider: "elevenlabs", // único provider implementado no nexus-bridge
++    voiceId: "",
+     stability: 0.72,
+     similarityBoost: 0.88,
+   },
+@@ -86,6 +87,8 @@
+       audioDubbing: {
+         ...DEFAULT_SETTINGS.audioDubbing,
+         ...parsed.audioDubbing,
++        // configs antigas salvas no localStorage podem ter "openai"/"azure", que o backend rejeita
++        voiceProvider: "elevenlabs",
+       },
+     };
+   } catch {
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/lib/types.ts web/lib/types.ts
+--- a/lib/types.ts	2026-09-18 18:53:24.612965925 +0000
++++ b/lib/types.ts	2026-09-18 18:53:57.258111598 +0000
+@@ -104,6 +104,8 @@
+ export interface AudioDubbingSettings {
+   targetLanguage: AudioTargetLanguage;
+   voiceProvider: AudioVoiceProvider;
++  /** voice_id da ElevenLabs (obrigatório no backend, a menos que ELEVENLABS_DEFAULT_VOICE_ID esteja no .env dele) */
++  voiceId: string;
+   stability: number;
+   similarityBoost: number;
+ }
+diff -ruN --strip-trailing-cr -x node_modules -x .next web_orig/next.config.js web/next.config.js
+--- a/next.config.js	2026-09-18 18:53:24.613020453 +0000
++++ b/next.config.js	2026-09-18 18:53:57.257929152 +0000
+@@ -1,7 +1,29 @@
++// Versao instalada do Next: o nome da opcao de limite de body mudou na 16
++// (middleware -> proxy). Setamos so a chave que a versao reconhece, sem warnings.
++const nextMajor = (() => {
++  try {
++    return parseInt(require("next/package.json").version.split(".")[0], 10);
++  } catch {
++    return 15;
++  }
++})();
++const bodyLimitKey = nextMajor >= 16 ? "proxyClientMaxBodySize" : "middlewareClientMaxBodySize";
++
+ /** @type {import('next').NextConfig} */
+ const nextConfig = {
+   reactStrictMode: true,
+ 
++  experimental: {
++    // O Next bufferiza em memoria o body das requisicoes que passam pelos rewrites
++    // (/nexus-proxy, /ollama-proxy) e, acima de 10MB, TRUNCA o resto em silencio
++    // ("Request body exceeded 10MB ... Only the first 10MB will be available").
++    // O upload de audio (ate 25MB no UI) chegava incompleto no FastAPI -> 422
++    // "file: Field required" + "Failed to proxy ... ECONNRESET" + 500 na UI.
++    [bodyLimitKey]: "100mb",
++    // Padrao do proxy = 30s. A dublagem sincrona (<10MB) espera a ElevenLabs e estourava.
++    proxyTimeout: 300_000,
++  },
++
+   // Proxy reverso via Next.js: o navegador so fala com a propria origem
+   // (localhost:3000), e o Next.js repassa a chamada por baixo dos panos
+   // para o Ollama / Nexus-Bridge reais. Isso elimina CORS e requisicoes

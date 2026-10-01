@@ -34,11 +34,11 @@ const config: Config = {
           "dark-raised": "#292927",
           "dark-sunken": "#141413",
         },
-        // Anthropic-style clay/terracotta accent
+        // Cores dinâmicas via CSS variables (tema)
         accent: {
-          DEFAULT: "#D97757",
-          hover: "#C4653F",
-          soft: "#F3E3DB",
+          DEFAULT: "rgb(var(--color-accent) / <alpha-value>)",
+          hover: "rgb(var(--color-accent-hover) / <alpha-value>)",
+          soft: "rgb(var(--color-accent-soft) / <alpha-value>)",
         },
         border: {
           light: "#E8E6DF",
@@ -53,6 +53,9 @@ const config: Config = {
       borderRadius: {
         xl2: "1.25rem",
       },
+      backdropBlur: {
+        xs: "2px",
+      },
       keyframes: {
         blink: {
           "0%, 100%": { opacity: "1" },
@@ -66,11 +69,16 @@ const config: Config = {
           from: { transform: "translateX(100%)" },
           to: { transform: "translateX(0)" },
         },
+        slideInLeft: {
+          from: { transform: "translateX(-100%)" },
+          to: { transform: "translateX(0)" },
+        },
       },
       animation: {
         blink: "blink 1s step-start infinite",
         fadeIn: "fadeIn 0.2s ease-out",
         slideIn: "slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
+        slideInLeft: "slideInLeft 0.25s cubic-bezier(0.16, 1, 0.3, 1)",
       },
     },
   },

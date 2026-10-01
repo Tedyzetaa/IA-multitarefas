@@ -46,7 +46,7 @@ export default function ArtifactPanel({
     <aside
       className="hidden lg:flex w-[45%] max-w-2xl shrink-0 flex-col
                  border-l border-border-light dark:border-border-dark
-                 bg-surface-light-raised dark:bg-surface-dark-raised
+                 bg-surface-light-raised dark:bg-surface-dark-raised glass-panel
                  animate-slideIn"
       aria-label="Painel de artefato"
     >
