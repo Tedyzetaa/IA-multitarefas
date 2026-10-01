@@ -1,0 +1,54 @@
+# Ambientes virtuais Python
+venv/
+env/
+ENV/
+.venv/
+
+# Dependências do Node.js
+node_modules/
+.pnp/
+.pnp.js
+.next/
+out/
+build/
+dist/
+
+# Ficheiros de ambiente e credenciais
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Pastas de geração de IA, outputs e modelos locais
+outputs/
+output/
+generated/
+generation/
+ComfyUI/output/
+ComfyUI/input/
+Fooocus/outputs/
+models/
+checkpoints/
+loras/
+vae/
+__pycache__/
+*.py[cod]
+*$py.class
+*.sqlite3
+*.db
+
+# Ficheiros de log e temporários
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Configurações de IDEs e editores
+.vscode/
+.idea/
+*.swp
+*.swo
